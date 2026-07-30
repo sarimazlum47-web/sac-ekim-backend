@@ -1,33 +1,37 @@
 // Saç Ekim Yayın Masası - basit backend
-// Instagram Business Login (OAuth) + Graph API çağrıları
+// Facebook Login for Business akışı ile Instagram Graph API bağlantısı
 
 const express = require("express");
 const fetch = require("node-fetch");
 const app = express();
 
-const APP_ID = process.env.IG_APP_ID;
-const APP_SECRET = process.env.IG_APP_SECRET;
-// Bu URL'i Glitch'te proje oluşturunca alacağın adresle değiştireceğiz (adım adım anlatacağım)
+const APP_ID = process.env.IG_APP_ID; // Facebook App ID (Basic ayarlarda gördüğün)
+const APP_SECRET = process.env.IG_APP_SECRET; // Facebook App Secret
 const REDIRECT_URI = process.env.REDIRECT_URI;
+const API_VERSION = "v21.0";
 
-let savedToken = null; // basit test amaçlı, gerçek kullanımda güvenli bir veritabanına yazılmalı
+let savedUserToken = null;
+let savedPages = null;
 
-// 1) Kullanıcıyı (seni) Instagram girişine yönlendiren adım
+// 1) Facebook giriş ekranına yönlendir
 app.get("/login", (req, res) => {
   const scopes = [
-    "instagram_business_basic",
-    "instagram_business_content_publish",
-    "instagram_business_manage_comments",
-    "instagram_business_manage_messages",
-    "instagram_business_manage_insights"
+    "pages_show_list",
+    "pages_read_engagement",
+    "instagram_basic",
+    "instagram_content_publish",
+    "instagram_manage_comments",
+    "instagram_manage_messages",
+    "instagram_manage_insights",
+    "business_management"
   ].join(",");
 
-  const authUrl = `https://www.instagram.com/oauth/authorize?client_id=${APP_ID}&redirect_uri=${encodeURIComponent(REDIRECT_URI)}&response_type=code&scope=${scopes}`;
+  const authUrl = `https://www.facebook.com/${API_VERSION}/dialog/oauth?client_id=${APP_ID}&redirect_uri=${encodeURIComponent(REDIRECT_URI)}&scope=${scopes}&response_type=code`;
 
-  res.send(`<a href="${authUrl}">Instagram ile giriş yap</a>`);
+  res.send(`<a href="${authUrl}">Facebook ile giriş yap (klinik hesabına bağlı Facebook hesabınla)</a>`);
 });
 
-// 2) Instagram, giriş başarılı olunca kullanıcıyı buraya "code" ile geri gönderir
+// 2) Facebook, giriş başarılı olunca "code" ile buraya geri gönderir
 app.get("/auth/callback", async (req, res) => {
   const code = req.query.code;
   if (!code) {
@@ -35,52 +39,43 @@ app.get("/auth/callback", async (req, res) => {
   }
 
   try {
-    // Kısa ömürlü token almak için code'u değiştiriyoruz
-    const tokenRes = await fetch("https://api.instagram.com/oauth/access_token", {
-      method: "POST",
-      headers: { "Content-Type": "application/x-www-form-urlencoded" },
-      body: new URLSearchParams({
-        client_id: APP_ID,
-        client_secret: APP_SECRET,
-        grant_type: "authorization_code",
-        redirect_uri: REDIRECT_URI,
-        code: code
-      })
-    });
+    // code'u kısa ömürlü kullanıcı token'ına çeviriyoruz
+    const tokenRes = await fetch(`https://graph.facebook.com/${API_VERSION}/oauth/access_token?client_id=${APP_ID}&redirect_uri=${encodeURIComponent(REDIRECT_URI)}&client_secret=${APP_SECRET}&code=${code}`);
     const tokenData = await tokenRes.json();
 
     if (!tokenData.access_token) {
       return res.send("Token alınamadı: " + JSON.stringify(tokenData));
     }
 
-    // Kısa ömürlü token'ı uzun ömürlü token'a çeviriyoruz (60 gün)
-    const longRes = await fetch(`https://graph.instagram.com/access_token?grant_type=ig_exchange_token&client_secret=${APP_SECRET}&access_token=${tokenData.access_token}`);
+    // Kısa ömürlü token'ı uzun ömürlüye (60 gün) çeviriyoruz
+    const longRes = await fetch(`https://graph.facebook.com/${API_VERSION}/oauth/access_token?grant_type=fb_exchange_token&client_id=${APP_ID}&client_secret=${APP_SECRET}&fb_exchange_token=${tokenData.access_token}`);
     const longData = await longRes.json();
+    savedUserToken = longData.access_token || tokenData.access_token;
 
-    savedToken = longData.access_token || tokenData.access_token;
+    // Bağlı Facebook Sayfalarını ve bunlara bağlı Instagram hesaplarını buluyoruz
+    const pagesRes = await fetch(`https://graph.facebook.com/${API_VERSION}/me/accounts?fields=name,access_token,instagram_business_account&access_token=${savedUserToken}`);
+    const pagesData = await pagesRes.json();
+    savedPages = pagesData.data || [];
+
+    let list = savedPages.map(p => `<li>${p.name} — Instagram bağlı mı: ${p.instagram_business_account ? "Evet (ID: " + p.instagram_business_account.id + ")" : "Hayır"}</li>`).join("");
 
     res.send(`
       <h2>Başarılı!</h2>
-      <p>Uzun ömürlü erişim token'ın:</p>
-      <textarea style="width:100%; height:100px;">${savedToken}</textarea>
-      <p>Bu token'ı güvenli bir yere kaydet (kimseyle paylaşma). 60 gün geçerli, sonra yenilenmesi gerekir.</p>
-      <p><a href="/me">Hesap bilgilerini test et</a></p>
+      <p>Kullanıcı token'ın (uzun ömürlü):</p>
+      <textarea style="width:100%; height:80px;">${savedUserToken}</textarea>
+      <p>Bağlı sayfaların:</p>
+      <ul>${list}</ul>
+      <p><a href="/me">Ham veriyi gör (JSON)</a></p>
     `);
   } catch (e) {
     res.send("Beklenmedik hata: " + e.message);
   }
 });
 
-// 3) Token çalışıyor mu diye basit bir test: kendi hesap bilgilerini çeker
+// 3) Ham veriyi test etmek için
 app.get("/me", async (req, res) => {
-  if (!savedToken) return res.send("Önce /login üzerinden giriş yapmalısın.");
-  try {
-    const r = await fetch(`https://graph.instagram.com/me?fields=id,username,account_type&access_token=${savedToken}`);
-    const data = await r.json();
-    res.json(data);
-  } catch (e) {
-    res.send("Hata: " + e.message);
-  }
+  if (!savedPages) return res.send("Önce /login üzerinden giriş yapmalısın.");
+  res.json(savedPages);
 });
 
 app.get("/", (req, res) => {
