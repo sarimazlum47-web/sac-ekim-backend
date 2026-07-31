@@ -17,6 +17,13 @@ let activeAccount = null; // { pageName, pageAccessToken, igId }
 const TARGET_PAGE_NAME = "DRMS Hair Clinic";
 
 app.use(express.json());
+app.use((req, res, next) => {
+  res.header("Access-Control-Allow-Origin", "*");
+  res.header("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
+  res.header("Access-Control-Allow-Headers", "Content-Type");
+  if (req.method === "OPTIONS") return res.sendStatus(200);
+  next();
+});
 
 // 1) Facebook giriş ekranına yönlendir
 app.get("/login", (req, res) => {
