@@ -12,6 +12,11 @@ const API_VERSION = "v21.0";
 
 let savedUserToken = null;
 let savedPages = null;
+let activeAccount = null; // { pageName, pageAccessToken, igId }
+
+const TARGET_PAGE_NAME = "DRMS Hair Clinic";
+
+app.use(express.json());
 
 // 1) Facebook giriş ekranına yönlendir
 app.get("/login", (req, res) => {
@@ -39,7 +44,6 @@ app.get("/auth/callback", async (req, res) => {
   }
 
   try {
-    // code'u kısa ömürlü kullanıcı token'ına çeviriyoruz
     const tokenRes = await fetch(`https://graph.facebook.com/${API_VERSION}/oauth/access_token?client_id=${APP_ID}&redirect_uri=${encodeURIComponent(REDIRECT_URI)}&client_secret=${APP_SECRET}&code=${code}`);
     const tokenData = await tokenRes.json();
 
@@ -47,15 +51,22 @@ app.get("/auth/callback", async (req, res) => {
       return res.send("Token alınamadı: " + JSON.stringify(tokenData));
     }
 
-    // Kısa ömürlü token'ı uzun ömürlüye (60 gün) çeviriyoruz
     const longRes = await fetch(`https://graph.facebook.com/${API_VERSION}/oauth/access_token?grant_type=fb_exchange_token&client_id=${APP_ID}&client_secret=${APP_SECRET}&fb_exchange_token=${tokenData.access_token}`);
     const longData = await longRes.json();
     savedUserToken = longData.access_token || tokenData.access_token;
 
-    // Bağlı Facebook Sayfalarını ve bunlara bağlı Instagram hesaplarını buluyoruz
     const pagesRes = await fetch(`https://graph.facebook.com/${API_VERSION}/me/accounts?fields=name,access_token,instagram_business_account&access_token=${savedUserToken}`);
     const pagesData = await pagesRes.json();
     savedPages = pagesData.data || [];
+
+    const match = savedPages.find(p => p.name === TARGET_PAGE_NAME && p.instagram_business_account);
+    if (match) {
+      activeAccount = {
+        pageName: match.name,
+        pageAccessToken: match.access_token,
+        igId: match.instagram_business_account.id
+      };
+    }
 
     let list = savedPages.map(p => `<li>${p.name} — Instagram bağlı mı: ${p.instagram_business_account ? "Evet (ID: " + p.instagram_business_account.id + ")" : "Hayır"}</li>`).join("");
 
@@ -65,17 +76,100 @@ app.get("/auth/callback", async (req, res) => {
       <textarea style="width:100%; height:80px;">${savedUserToken}</textarea>
       <p>Bağlı sayfaların:</p>
       <ul>${list}</ul>
-      <p><a href="/me">Ham veriyi gör (JSON)</a></p>
+      <p><strong>Aktif hesap:</strong> ${activeAccount ? activeAccount.pageName + " (IG ID: " + activeAccount.igId + ")" : "Bulunamadı — TARGET_PAGE_NAME değerini kontrol et"}</p>
+      <p><a href="/me">Ham veriyi gör (JSON)</a> · <a href="/ig/media">Son paylaşımları gör</a> · <a href="/ig/insights">İstatistikleri gör</a></p>
     `);
   } catch (e) {
     res.send("Beklenmedik hata: " + e.message);
   }
 });
 
-// 3) Ham veriyi test etmek için
 app.get("/me", async (req, res) => {
   if (!savedPages) return res.send("Önce /login üzerinden giriş yapmalısın.");
   res.json(savedPages);
+});
+
+function requireAccount(res) {
+  if (!activeAccount) {
+    res.status(400).json({ error: "Aktif hesap yok. Önce /login yap." });
+    return false;
+  }
+  return true;
+}
+
+app.get("/ig/media", async (req, res) => {
+  if (!requireAccount(res)) return;
+  try {
+    const r = await fetch(`https://graph.facebook.com/${API_VERSION}/${activeAccount.igId}/media?fields=id,caption,media_type,permalink,timestamp,like_count,comments_count&access_token=${activeAccount.pageAccessToken}`);
+    const data = await r.json();
+    res.json(data);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.get("/ig/comments/:mediaId", async (req, res) => {
+  if (!requireAccount(res)) return;
+  try {
+    const r = await fetch(`https://graph.facebook.com/${API_VERSION}/${req.params.mediaId}/comments?fields=id,text,username,timestamp&access_token=${activeAccount.pageAccessToken}`);
+    const data = await r.json();
+    res.json(data);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.post("/ig/comments/:commentId/reply", async (req, res) => {
+  if (!requireAccount(res)) return;
+  const { message } = req.body;
+  if (!message) return res.status(400).json({ error: "message alanı gerekli" });
+  try {
+    const r = await fetch(`https://graph.facebook.com/${API_VERSION}/${req.params.commentId}/replies`, {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({ message, access_token: activeAccount.pageAccessToken })
+    });
+    const data = await r.json();
+    res.json(data);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.post("/ig/publish", async (req, res) => {
+  if (!requireAccount(res)) return;
+  const { image_url, caption } = req.body;
+  if (!image_url) return res.status(400).json({ error: "image_url alanı gerekli (internetten erişilebilir bir görsel adresi olmalı)" });
+  try {
+    const containerRes = await fetch(`https://graph.facebook.com/${API_VERSION}/${activeAccount.igId}/media`, {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({ image_url, caption: caption || "", access_token: activeAccount.pageAccessToken })
+    });
+    const containerData = await containerRes.json();
+    if (!containerData.id) return res.json({ step: "container", result: containerData });
+
+    const publishRes = await fetch(`https://graph.facebook.com/${API_VERSION}/${activeAccount.igId}/media_publish`, {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({ creation_id: containerData.id, access_token: activeAccount.pageAccessToken })
+    });
+    const publishData = await publishRes.json();
+    res.json({ step: "published", result: publishData });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.get("/ig/insights", async (req, res) => {
+  if (!requireAccount(res)) return;
+  try {
+    const r = await fetch(`https://graph.facebook.com/${API_VERSION}/${activeAccount.igId}/insights?metric=reach,profile_views&period=day&access_token=${activeAccount.pageAccessToken}`);
+    const data = await r.json();
+    res.json(data);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
 });
 
 app.get("/", (req, res) => {
