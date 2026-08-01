@@ -15,6 +15,9 @@ let savedPages = null;
 let activeAccount = null; // { pageName, pageAccessToken, igId }
 
 const TARGET_PAGE_NAME = "DRMS Hair Clinic";
+const WEBHOOK_VERIFY_TOKEN = "sacekim2026webhook"; // Meta panelinde webhook kurarken aynısını gireceğiz
+
+let incomingMessages = []; // { senderId, text, timestamp }
 
 app.use(express.json());
 app.use((req, res, next) => {
@@ -73,6 +76,9 @@ app.get("/auth/callback", async (req, res) => {
         pageAccessToken: match.access_token,
         igId: match.instagram_business_account.id
       };
+      try {
+        await fetch(`https://graph.facebook.com/${API_VERSION}/me/subscribed_apps?subscribed_fields=messages&access_token=${match.access_token}`, { method: "POST" });
+      } catch (e) { /* abonelik hatası olursa sessizce geç, elle de yapılabilir */ }
     }
 
     let list = savedPages.map(p => `<li>${p.name} — Instagram bağlı mı: ${p.instagram_business_account ? "Evet (ID: " + p.instagram_business_account.id + ")" : "Hayır"}</li>`).join("");
@@ -172,6 +178,60 @@ app.get("/ig/insights", async (req, res) => {
   if (!requireAccount(res)) return;
   try {
     const r = await fetch(`https://graph.facebook.com/${API_VERSION}/${activeAccount.igId}/insights?metric=reach,profile_views&period=day&access_token=${activeAccount.pageAccessToken}`);
+    const data = await r.json();
+    res.json(data);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.get("/webhook", (req, res) => {
+  const mode = req.query["hub.mode"];
+  const token = req.query["hub.verify_token"];
+  const challenge = req.query["hub.challenge"];
+  if (mode === "subscribe" && token === WEBHOOK_VERIFY_TOKEN) {
+    return res.status(200).send(challenge);
+  }
+  res.sendStatus(403);
+});
+
+app.post("/webhook", (req, res) => {
+  try {
+    const entries = req.body.entry || [];
+    for (const entry of entries) {
+      const messaging = entry.messaging || [];
+      for (const event of messaging) {
+        if (event.message && event.message.text && event.sender) {
+          incomingMessages.push({
+            senderId: event.sender.id,
+            text: event.message.text,
+            timestamp: Date.now()
+          });
+        }
+      }
+    }
+  } catch (e) { /* beklenmeyen format gelirse yoksay */ }
+  res.sendStatus(200);
+});
+
+app.get("/ig/messages", (req, res) => {
+  res.json(incomingMessages);
+});
+
+app.post("/ig/messages/:senderId/reply", async (req, res) => {
+  if (!requireAccount(res)) return;
+  const { message } = req.body;
+  if (!message) return res.status(400).json({ error: "message alanı gerekli" });
+  try {
+    const r = await fetch(`https://graph.facebook.com/${API_VERSION}/me/messages?access_token=${activeAccount.pageAccessToken}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        recipient: { id: req.params.senderId },
+        message: { text: message },
+        messaging_type: "RESPONSE"
+      })
+    });
     const data = await r.json();
     res.json(data);
   } catch (e) {
