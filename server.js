@@ -13,7 +13,7 @@ const API_VERSION = "v21.0";
 
 let savedUserToken = null;
 let savedPages = null;
-let activeAccount = null; // { pageName, pageAccessToken, igId }
+let activeAccount = null;
 
 const TARGET_PAGE_NAME = "DRMS Hair Clinic";
 const WEBHOOK_VERIFY_TOKEN = "sacekim2026webhook";
@@ -86,6 +86,7 @@ app.get("/login", (req, res) => {
   const scopes = [
     "pages_show_list",
     "pages_read_engagement",
+    "pages_manage_metadata",
     "instagram_basic",
     "instagram_content_publish",
     "instagram_manage_comments",
@@ -118,8 +119,10 @@ app.get("/auth/callback", async (req, res) => {
     if (match) {
       activeAccount = { pageName: match.name, pageAccessToken: match.access_token, igId: match.instagram_business_account.id };
       try {
-        await fetch(`https://graph.facebook.com/${API_VERSION}/me/subscribed_apps?subscribed_fields=messages&access_token=${match.access_token}`, { method: "POST" });
-      } catch (e) {}
+        const subRes = await fetch(`https://graph.facebook.com/${API_VERSION}/me/subscribed_apps?subscribed_fields=messages&access_token=${match.access_token}`, { method: "POST" });
+        const subData = await subRes.json();
+        console.log("Webhook aboneliği sonucu:", JSON.stringify(subData));
+      } catch (e) { console.log("Webhook abonelik hatası:", e.message); }
     }
 
     let list = savedPages.map(p => `<li>${p.name} — Instagram bağlı mı: ${p.instagram_business_account ? "Evet (ID: " + p.instagram_business_account.id + ")" : "Hayır"}</li>`).join("");
@@ -300,6 +303,14 @@ setInterval(autoScanComments, 2 * 60 * 1000);
 app.get("/report/daily", (req, res) => {
   resetDailyLogIfNewDay();
   res.json(dailyLog);
+});
+
+app.get("/ig/subscription-status", async (req, res) => {
+  if (!requireAccount(res)) return;
+  try {
+    const r = await fetch(`https://graph.facebook.com/${API_VERSION}/me/subscribed_apps?access_token=${activeAccount.pageAccessToken}`);
+    res.json(await r.json());
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 app.get("/", (req, res) => {
