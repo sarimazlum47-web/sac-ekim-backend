@@ -13,7 +13,7 @@ const API_VERSION = "v21.0";
 
 let savedUserToken = null;
 let savedPages = null;
-let activeAccount = null;
+let activeAccount = null; // { pageName, pageAccessToken, igId }
 
 const TARGET_PAGE_NAME = "DRMS Hair Clinic";
 const WEBHOOK_VERIFY_TOKEN = "sacekim2026webhook";
@@ -22,6 +22,7 @@ let incomingMessages = [];
 const repliedMessageIds = new Set();
 const repliedCommentIds = new Set();
 
+// Gün sonu raporu için basit sayaçlar (sunucu yeniden başlayınca sıfırlanır)
 let dailyLog = { date: new Date().toISOString().slice(0,10), autoReplies: 0, leadsFlagged: 0, details: [] };
 function resetDailyLogIfNewDay() {
   const today = new Date().toISOString().slice(0,10);
@@ -43,6 +44,7 @@ app.use((req, res, next) => {
   next();
 });
 
+// Claude'a soru sorma (backend üzerinden, kullanıcının kendi Anthropic anahtarıyla)
 async function askClaudeBackend(prompt) {
   const res = await fetch("https://api.anthropic.com/v1/messages", {
     method: "POST",
@@ -62,6 +64,7 @@ async function askClaudeBackend(prompt) {
   return data.content.map(b => b.text || "").join("\n").trim();
 }
 
+// Otomatik yanıt kuralları — tek bir yerde tanımlı, hem yorum hem mesaj için kullanılır
 function buildAutoReplyPrompt(incomingText) {
   return `Sen DRMS Hair Clinic (saç ekimi kliniği) Instagram hesabının müşteri hizmetleri temsilcisisin. Gerçek bir insan gibi, doğal ve sıcak bir üslupla yazıyorsun — yapay zeka olduğunu belirtme, robotik cümleler kurma.
 
@@ -82,6 +85,7 @@ function isRedirectSuggested(text) {
   return /telefon numaras[ıi]|numaranızı b[ıi]rak|arayal[ıi]m|sizi arasın/i.test(text);
 }
 
+// 1) Facebook giriş ekranına yönlendir
 app.get("/login", (req, res) => {
   const scopes = [
     "pages_show_list",
@@ -98,6 +102,7 @@ app.get("/login", (req, res) => {
   res.send(`<a href="${authUrl}">Facebook ile giriş yap (klinik hesabına bağlı Facebook hesabınla)</a>`);
 });
 
+// 2) Facebook, giriş başarılı olunca "code" ile buraya geri gönderir
 app.get("/auth/callback", async (req, res) => {
   const code = req.query.code;
   if (!code) return res.send("Hata: code parametresi gelmedi. " + JSON.stringify(req.query));
@@ -184,12 +189,18 @@ app.post("/ig/comments/:commentId/reply", async (req, res) => {
 
 app.post("/ig/publish", async (req, res) => {
   if (!requireAccount(res)) return;
-  const { image_url, caption } = req.body;
+  const { image_url, caption, asStory } = req.body;
   if (!image_url) return res.status(400).json({ error: "image_url alanı gerekli" });
   try {
+    const containerParams = { image_url, access_token: activeAccount.pageAccessToken };
+    if (asStory) {
+      containerParams.media_type = "STORIES"; // Hikayelerde caption desteklenmiyor
+    } else {
+      containerParams.caption = caption || "";
+    }
     const containerRes = await fetch(`https://graph.facebook.com/${API_VERSION}/${activeAccount.igId}/media`, {
       method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" },
-      body: new URLSearchParams({ image_url, caption: caption || "", access_token: activeAccount.pageAccessToken })
+      body: new URLSearchParams(containerParams)
     });
     const containerData = await containerRes.json();
     if (!containerData.id) return res.json({ step: "container", result: containerData });
@@ -209,6 +220,7 @@ app.get("/ig/insights", async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+// --- Webhook (gerçek zamanlı DM alma + otomatik yanıt) ---
 app.get("/webhook", (req, res) => {
   console.log("Webhook DOĞRULAMA isteği geldi:", JSON.stringify(req.query));
   const mode = req.query["hub.mode"];
@@ -220,7 +232,7 @@ app.get("/webhook", (req, res) => {
 
 app.post("/webhook", async (req, res) => {
   console.log("Webhook POST isteği geldi:", JSON.stringify(req.body));
-  res.sendStatus(200);
+  res.sendStatus(200); // Meta'ya hemen onay ver, işlemi arka planda yap
   try {
     const entries = req.body.entry || [];
     for (const entry of entries) {
@@ -269,6 +281,7 @@ app.post("/ig/messages/:senderId/reply", async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+// --- Yorumlar için otomatik tarama döngüsü (webhook'suz, periyodik) ---
 async function autoScanComments() {
   if (!activeAccount || !ANTHROPIC_API_KEY) return;
   try {
@@ -298,8 +311,10 @@ async function autoScanComments() {
   } catch (e) { console.log("Yorum tarama hatası:", e.message); }
 }
 
+// Her 2 dakikada bir yeni yorumları kontrol et
 setInterval(autoScanComments, 2 * 60 * 1000);
 
+// Günlük rapor
 app.get("/report/daily", (req, res) => {
   resetDailyLogIfNewDay();
   res.json(dailyLog);
