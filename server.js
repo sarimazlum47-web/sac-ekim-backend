@@ -86,7 +86,7 @@ app.get("/login", (req, res) => {
   const scopes = [
     "pages_show_list",
     "pages_read_engagement",
-    "pages_manage_metadata",
+    "pages_messaging",
     "instagram_basic",
     "instagram_content_publish",
     "instagram_manage_comments",
